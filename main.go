@@ -66,7 +66,7 @@ func oauthHandlerPage(w http.ResponseWriter, r *http.Request) {
 
 	// access tokens expire after an hour, so we want to generate a fresh new access token before that
 	go func() {
-		if !refreshTokenLoopRunning.CompareAndSwap(false, true) {
+		if refreshTokenLoopRunning.Swap(true) {
 			return
 		}
 
