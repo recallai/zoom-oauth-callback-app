@@ -109,8 +109,31 @@ func generateObfToken(meetingID string) (string, error) {
 	return tokenResp.Token, nil
 }
 
-func ptr[T any](val T) *T {
-	return &val
+func generateZakToken(meetingID string) (string, error) {
+	url := "https://api.zoom.us/v2/users/me/token?type=zak"
+	if meetingID != "" {
+		url += fmt.Sprintf("&meeting_id=%s", meetingID)
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	req.Header.Add("Authorization", fmt.Sprintf("Bearer %s", oauthToken))
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("error fetching zak token: %w", err)
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	jsonDecoder := json.NewDecoder(resp.Body)
+	var tokenResp tokenResp
+
+	if err := jsonDecoder.Decode(&tokenResp); err != nil {
+		return "", fmt.Errorf("failed to decode zak token response: %w", err)
+	}
+
+	return tokenResp.Token, nil
 }
 
 func generateAuthorizationHeader() string {

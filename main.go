@@ -35,6 +35,7 @@ func main() {
 	mux.HandleFunc("GET /zoom/oauth-callback", oauthHandlerPage)
 	mux.HandleFunc("GET /recall/oauth-callback", recallOauthCallback)
 	mux.HandleFunc("GET /recall/obf-callback", recallObfCallback)
+	mux.HandleFunc("GET /recall/zak-callback", recallZakCallback)
 
 	http.ListenAndServe("[::]:9567", mux)
 }
@@ -140,6 +141,35 @@ func recallObfCallback(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	if _, err := w.Write([]byte(obfToken)); err != nil {
 		slog.Error("error writing recall obf token response", "error", err)
+		return
+	}
+}
+
+// Recall hits this page when trying to launch a bot authenticated with a ZAK token
+// for this implementation, we also pass the meeting_id a sa query parameter
+func recallZakCallback(w http.ResponseWriter, r *http.Request) {
+	if err := verifyRequestIsFromRecall(r); err != nil {
+		slog.Error(err.Error())
+		http.Error(w, "recall auth secret provided is incorrect", http.StatusUnauthorized)
+		return
+	}
+	meetingID := r.URL.Query().Get("meeting_id")
+
+	if oauthToken == "" {
+		http.Error(w, "oauth token is not set. please visit /zoom/oauth", http.StatusServiceUnavailable)
+		return
+	}
+
+	zakToken, err := generateZakToken(meetingID)
+	if err != nil {
+		slog.Error(err.Error())
+		http.Error(w, "error fetching ZAK token", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write([]byte(zakToken)); err != nil {
+		slog.Error("error writing recall zak token response", "error", err)
 		return
 	}
 }
