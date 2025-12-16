@@ -92,7 +92,7 @@ func generateObfToken(meetingID string) (string, error) {
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("error fetching oauth token: %w", err)
+		return "", fmt.Errorf("error fetching obf token: %w", err)
 	}
 	defer func() {
 		_ = resp.Body.Close()
