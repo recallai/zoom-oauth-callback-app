@@ -1,6 +1,6 @@
 # Zoom OAuth Server
 
-A simple OAuth token server for Zoom integration with Recall.ai. Implemented in Golang.
+A simple OAuth token server for Zoom integration with Recall.ai. Implemented in Typescript using Express.js.
 
 You can run the server with `go run .`
 
