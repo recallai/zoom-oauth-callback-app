@@ -1,3 +1,4 @@
+import { randomUUID } from "crypto";
 import express from "express";
 
 const ZOOM_CLIENT_ID = process.env.ZOOM_CLIENT_ID ?? "";
@@ -41,10 +42,6 @@ interface OAuthTokenResponse {
   expires_in: number;
   scope: string;
   api_url: string;
-}
-
-interface JwtPayload {
-  uid: string;
 }
 
 interface TokenResponse {
@@ -93,20 +90,6 @@ async function refreshOAuthToken(refreshToken: string): Promise<{ accessToken: s
 
   const data = (await response.json()) as OAuthTokenResponse;
   return { accessToken: data.access_token, refreshToken: data.refresh_token };
-}
-
-function getUserIdFromToken(accessToken: string): string {
-  const parts = accessToken.split(".");
-  if (parts.length !== 3) {
-    throw new Error("invalid JWT format");
-  }
-
-  const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString()) as JwtPayload;
-  if (!payload.uid) {
-    throw new Error("JWT does not contain uid");
-  }
-
-  return payload.uid;
 }
 
 async function generateObfToken(accessToken: string, meetingId: string): Promise<string> {
@@ -172,7 +155,7 @@ app.get("/zoom/oauth-callback", async (req, res) => {
 
   try {
     const tokens = await generateOAuthToken(authCode);
-    const userId = getUserIdFromToken(tokens.accessToken);
+    const userId = randomUUID();
 
     const existingUser = users.get(userId);
     if (existingUser?.refreshIntervalId) {
