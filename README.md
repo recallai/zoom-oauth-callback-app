@@ -2,7 +2,9 @@
 
 A simple OAuth token server for Zoom integration with Recall.ai. Implemented in Typescript using Express.js.
 
-You can run the server with `go run .`
+You can run the server by:
+1. installing node dependencies with `npm install`
+2. running the server with `./run.sh`
 
 ## API Endpoints
 
