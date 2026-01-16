@@ -92,8 +92,8 @@ async function refreshOAuthToken(refreshToken: string): Promise<{ accessToken: s
   return { accessToken: data.access_token, refreshToken: data.refresh_token };
 }
 
-async function generateObfToken(accessToken: string, meetingId: string): Promise<string> {
-  const url = `https://api.zoom.us/v2/users/me/token?type=onbehalf&meeting_id=${meetingId}`;
+async function generateObfToken(accessToken: string): Promise<string> {
+  const url = `https://api.zoom.us/v2/users/me/token?type=onbehalf`;
   const response = await fetch(url, {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
@@ -102,11 +102,8 @@ async function generateObfToken(accessToken: string, meetingId: string): Promise
   return data.token;
 }
 
-async function generateZakToken(accessToken: string, meetingId?: string): Promise<string> {
+async function generateZakToken(accessToken: string): Promise<string> {
   let url = "https://api.zoom.us/v2/users/me/token?type=zak";
-  if (meetingId) {
-    url += `&meeting_id=${meetingId}`;
-  }
 
   const response = await fetch(url, {
     headers: { Authorization: `Bearer ${accessToken}` },
@@ -118,13 +115,6 @@ async function generateZakToken(accessToken: string, meetingId?: string): Promis
 
 function verifyRequestIsFromRecall(authToken: string | undefined): boolean {
   return authToken === RECALL_CALLBACK_SECRET;
-}
-
-const ZOOM_MEETING_ID_REGEX = /zoom\.(us|com)\/(?:j|s|wc\/join)\/(\d+)/;
-
-function parseMeetingIdFromUrl(url: string): string | null {
-  const match = url.match(ZOOM_MEETING_ID_REGEX);
-  return match ? match[2] : null;
 }
 
 function getCookie(req: express.Request, name: string): string | undefined {
@@ -239,24 +229,18 @@ app.post("/launch", async (req, res) => {
     return;
   }
 
+  if (!RECALL_API_KEY) {
+    res.status(500).send("RECALL_API_KEY is not configured");
+    return;
+  }
+
   const meetingUrl = req.body.meeting_url as string | undefined;
   if (!meetingUrl) {
     res.status(400).send("meeting_url is required");
     return;
   }
 
-  const meetingId = parseMeetingIdFromUrl(meetingUrl);
-  if (!meetingId) {
-    res.status(400).send("could not parse meeting ID from URL");
-    return;
-  }
-
-  if (!RECALL_API_KEY) {
-    res.status(500).send("RECALL_API_KEY is not configured");
-    return;
-  }
-
-  const obfTokenUrl = `${BASE_URL}/recall/obf-callback?auth_token=${RECALL_CALLBACK_SECRET}&user_id=${userId}&meeting_id=${meetingId}`;
+  const obfTokenUrl = `${BASE_URL}/recall/obf-callback?auth_token=${RECALL_CALLBACK_SECRET}&user_id=${userId}`;
 
   try {
     const response = await fetch("https://us-east-1.recall.ai/api/v1/bot", {
@@ -336,13 +320,6 @@ app.get("/recall/obf-callback", async (req, res) => {
     return;
   }
 
-  const meetingId = req.query.meeting_id as string | undefined;
-  if (!meetingId) {
-    console.error("no meeting_id provided");
-    res.status(400).send("no meeting_id provided");
-    return;
-  }
-
   const userTokens = users.get(userId);
   if (!userTokens) {
     res.status(503).send(`oauth token not found for user: ${userId}. please visit /zoom/oauth`);
@@ -350,7 +327,7 @@ app.get("/recall/obf-callback", async (req, res) => {
   }
 
   try {
-    const obfToken = await generateObfToken(userTokens.accessToken, meetingId);
+    const obfToken = await generateObfToken(userTokens.accessToken);
     res.send(obfToken);
   } catch (error) {
     console.error("error fetching OBF token", error);
@@ -379,7 +356,7 @@ app.get("/recall/zak-callback", async (req, res) => {
   }
 
   try {
-    const zakToken = await generateZakToken(userTokens.accessToken, req.query.meeting_id as string | undefined);
+    const zakToken = await generateZakToken(userTokens.accessToken);
     res.send(zakToken);
   } catch (error) {
     console.error("error fetching ZAK token", error);
