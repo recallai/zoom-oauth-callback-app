@@ -255,6 +255,10 @@ app.post("/launch", async (req, res) => {
         zoom: {
             obf_token_url: obfTokenUrl,
         },
+        automatic_leave: {
+          // you can set the waiting room timeout to determine how long the bot will wait for the OBF user to join the meeting
+          waiting_room_timeout: 1200,
+        }
       }),
     });
 
