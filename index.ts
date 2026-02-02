@@ -6,17 +6,28 @@ const ZOOM_CLIENT_SECRET = process.env.ZOOM_CLIENT_SECRET ?? "";
 const BASE_URL = process.env.BASE_URL ?? "";
 let RECALL_CALLBACK_SECRET = process.env.RECALL_CALLBACK_SECRET ?? "";
 const RECALL_API_KEY = process.env.RECALL_API_KEY ?? "";
+const RECALL_ZOOM_OAUTH_APP_ID = process.env.RECALL_ZOOM_OAUTH_APP_ID ?? "";
+const RECALL_API_BASE_URL = process.env.RECALL_API_BASE_URL ?? "https://us-east-1.recall.ai";
+const USE_RECALL_OAUTH = process.argv.includes("--oauth");
 
 if (!ZOOM_CLIENT_ID) {
   console.error("missing required environment variable: ZOOM_CLIENT_ID");
   process.exit(1);
 }
-if (!ZOOM_CLIENT_SECRET) {
+if (!ZOOM_CLIENT_SECRET && !USE_RECALL_OAUTH) {
   console.error("missing required environment variable: ZOOM_CLIENT_SECRET");
   process.exit(1);
 }
 if (!BASE_URL) {
   console.error("missing required environment variable: BASE_URL (hint: set to the public URL of this server, e.g. https://your-ngrok-url.ngrok.io)");
+  process.exit(1);
+}
+if (USE_RECALL_OAUTH && !RECALL_API_KEY) {
+  console.error("missing required environment variable: RECALL_API_KEY (required when running with --oauth)");
+  process.exit(1);
+}
+if (USE_RECALL_OAUTH && !RECALL_ZOOM_OAUTH_APP_ID) {
+  console.error("missing required environment variable: RECALL_ZOOM_OAUTH_APP_ID (required when running with --oauth)");
   process.exit(1);
 }
 if (!RECALL_CALLBACK_SECRET) {
@@ -28,9 +39,10 @@ const TOKEN_REFRESH_INTERVAL_MS = 20 * 60 * 1000;
 
 interface UserTokens {
   visibleUserId: string;
-  accessToken: string;
-  refreshToken: string;
+  accessToken?: string;
+  refreshToken?: string;
   refreshIntervalId: NodeJS.Timeout | null;
+  recallCredentialId?: string;
 }
 
 const users = new Map<string, UserTokens>();
@@ -46,6 +58,25 @@ interface OAuthTokenResponse {
 
 interface TokenResponse {
   token: string;
+}
+
+interface RecallCredentialResponse {
+  id: string;
+}
+
+interface RecallAccessTokenResponse {
+  access_token?: string;
+  token?: string;
+}
+
+async function readResponseBody(response: Response): Promise<unknown> {
+  const text = await response.text();
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
 }
 
 function generateAuthorizationHeader(): string {
@@ -113,6 +144,74 @@ async function generateZakToken(accessToken: string): Promise<string> {
   return data.token;
 }
 
+async function createRecallZoomOAuthCredential(authCode: string): Promise<string> {
+  const redirectUri = `${BASE_URL}/zoom/oauth-callback`;
+  const response = await fetch(`${RECALL_API_BASE_URL}/api/v2/zoom-oauth-credentials/`, {
+    method: "POST",
+    headers: {
+      "Authorization": `Token ${RECALL_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      oauth_app: RECALL_ZOOM_OAUTH_APP_ID,
+      authorization_code: {
+        code: authCode,
+        redirect_uri: redirectUri,
+      },
+    }),
+  });
+
+  const data = (await readResponseBody(response)) as RecallCredentialResponse | string | null;
+  if (!response.ok) {
+    throw new Error(`recall oauth credential creation failed: ${JSON.stringify(data)}`);
+  }
+
+  if (!data || typeof data !== "object" || !("id" in data)) {
+    throw new Error(`recall oauth credential response missing id: ${JSON.stringify(data)}`);
+  }
+
+  return (data as RecallCredentialResponse).id;
+}
+
+async function getRecallAccessToken(credentialId: string): Promise<string> {
+  const response = await fetch(`${RECALL_API_BASE_URL}/api/v2/zoom-oauth-credentials/${credentialId}/access-token/`, {
+    headers: {
+      "Authorization": `Token ${RECALL_API_KEY}`,
+    },
+  });
+
+  const data = (await readResponseBody(response)) as RecallAccessTokenResponse | string | null;
+  if (!response.ok) {
+    throw new Error(`recall access token fetch failed: ${JSON.stringify(data)}`);
+  }
+
+  if (typeof data === "string") {
+    return data;
+  }
+
+  const accessToken = data?.access_token ?? data?.token;
+  if (!accessToken) {
+    throw new Error(`recall access token response missing token: ${JSON.stringify(data)}`);
+  }
+
+  return accessToken;
+}
+
+async function getAccessTokenForUser(userTokens: UserTokens): Promise<string> {
+  if (USE_RECALL_OAUTH) {
+    if (!userTokens.recallCredentialId) {
+      throw new Error("no recall credential stored for user");
+    }
+    return getRecallAccessToken(userTokens.recallCredentialId);
+  }
+
+  if (!userTokens.accessToken) {
+    throw new Error("no oauth access token stored for user");
+  }
+
+  return userTokens.accessToken;
+}
+
 function verifyRequestIsFromRecall(authToken: string | undefined): boolean {
   return authToken === RECALL_CALLBACK_SECRET;
 }
@@ -144,7 +243,6 @@ app.get("/zoom/oauth-callback", async (req, res) => {
   }
 
   try {
-    const tokens = await generateOAuthToken(authCode);
     const userId = randomUUID();
 
     const existingUser = users.get(userId);
@@ -152,6 +250,20 @@ app.get("/zoom/oauth-callback", async (req, res) => {
       clearInterval(existingUser.refreshIntervalId);
     }
 
+    if (USE_RECALL_OAUTH) {
+      const credentialId = await createRecallZoomOAuthCredential(authCode);
+      const userTokens: UserTokens = {
+        visibleUserId: userId,
+        refreshIntervalId: null,
+        recallCredentialId: credentialId,
+      };
+      users.set(userId, userTokens);
+      res.cookie("zoom_user_id", userId, { httpOnly: true, maxAge: 30 * 24 * 60 * 60 * 1000 });
+      res.send(`successfully stored recall oauth credential ${credentialId} for user: ${userId}`);
+      return;
+    }
+
+    const tokens = await generateOAuthToken(authCode);
     const userTokens: UserTokens = {
       visibleUserId: userId,
       accessToken: tokens.accessToken,
@@ -161,6 +273,7 @@ app.get("/zoom/oauth-callback", async (req, res) => {
 
     userTokens.refreshIntervalId = setInterval(async () => {
       try {
+        if (!userTokens.refreshToken) return;
         const newTokens = await refreshOAuthToken(userTokens.refreshToken);
         userTokens.accessToken = newTokens.accessToken;
         userTokens.refreshToken = newTokens.refreshToken;
@@ -174,8 +287,13 @@ app.get("/zoom/oauth-callback", async (req, res) => {
     res.cookie("zoom_user_id", userId, { httpOnly: true, maxAge: 30 * 24 * 60 * 60 * 1000 });
     res.send(`successfully generated and stored oauth token ${tokens.accessToken} for user: ${userId}`);
   } catch (error) {
-    console.error("error generating oauth token", error);
-    res.status(500).send("failed to generate oauth token");
+    if (USE_RECALL_OAUTH) {
+      console.error("error storing recall oauth credential", error);
+      res.status(500).send("failed to store recall oauth credential");
+    } else {
+      console.error("error generating oauth token", error);
+      res.status(500).send("failed to generate oauth token");
+    }
   }
 });
 
@@ -194,7 +312,8 @@ app.get("/me", (req, res) => {
 
   res.json({
     user_id: userId,
-    has_oauth_token: !!userTokens.accessToken,
+    oauth_mode: USE_RECALL_OAUTH ? "recall" : "local",
+    has_oauth_token: USE_RECALL_OAUTH ? !!userTokens.recallCredentialId : !!userTokens.accessToken,
   });
 });
 
@@ -243,7 +362,7 @@ app.post("/launch", async (req, res) => {
   const obfTokenUrl = `${BASE_URL}/recall/obf-callback?auth_token=${RECALL_CALLBACK_SECRET}&user_id=${userId}`;
 
   try {
-    const response = await fetch("https://us-east-1.recall.ai/api/v1/bot", {
+    const response = await fetch(`${RECALL_API_BASE_URL}/api/v1/bot`, {
       method: "POST",
       headers: {
         "Authorization": `Token ${RECALL_API_KEY}`,
@@ -287,7 +406,7 @@ app.post("/launch", async (req, res) => {
   }
 });
 
-app.get("/recall/oauth-callback", (req, res) => {
+app.get("/recall/oauth-callback", async (req, res) => {
   if (!verifyRequestIsFromRecall(req.query.auth_token as string | undefined)) {
     console.error("recall auth secret provided is incorrect");
     res.status(401).send("recall auth secret provided is incorrect");
@@ -307,7 +426,13 @@ app.get("/recall/oauth-callback", (req, res) => {
     return;
   }
 
-  res.send(userTokens.accessToken);
+  try {
+    const accessToken = await getAccessTokenForUser(userTokens);
+    res.send(accessToken);
+  } catch (error) {
+    console.error("error fetching oauth token", error);
+    res.status(500).send("error fetching oauth token");
+  }
 });
 
 app.get("/recall/obf-callback", async (req, res) => {
@@ -331,7 +456,8 @@ app.get("/recall/obf-callback", async (req, res) => {
   }
 
   try {
-    const obfToken = await generateObfToken(userTokens.accessToken);
+    const accessToken = await getAccessTokenForUser(userTokens);
+    const obfToken = await generateObfToken(accessToken);
     res.send(obfToken);
   } catch (error) {
     console.error("error fetching OBF token", error);
@@ -360,7 +486,8 @@ app.get("/recall/zak-callback", async (req, res) => {
   }
 
   try {
-    const zakToken = await generateZakToken(userTokens.accessToken);
+    const accessToken = await getAccessTokenForUser(userTokens);
+    const zakToken = await generateZakToken(accessToken);
     res.send(zakToken);
   } catch (error) {
     console.error("error fetching ZAK token", error);
